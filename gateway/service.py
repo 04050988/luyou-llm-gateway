@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Set
 
 import httpx
@@ -17,6 +18,7 @@ from .registry import Registry, RegistryManager
 from .scheduler import RoundRobin, select_key
 from .sse import stream_to_client
 from .stats import KeyStats, KeyStatsStore
+from .usage import UsageLedger
 
 logger = logging.getLogger("gateway.service")
 
@@ -46,6 +48,33 @@ class GatewayService:
             limits=httpx.Limits(max_connections=200, max_keepalive_connections=50),
         )
         self.catalog = ModelCatalog(self.client)
+        # 每日用量台账（SQLite，与配置同目录）
+        db_dir = Path(self.rm.config_path).parent
+        self.usage = UsageLedger(db_dir / "usage.db")
+
+    def _book_usage(
+        self,
+        provider: str,
+        model: str,
+        key: str,
+        ok: bool,
+        throttled: bool = False,
+        usage: Optional[dict] = None,
+    ) -> None:
+        """记一次用量台账（异步落盘，不阻塞请求路径）。"""
+        try:
+            u = usage or {}
+            self.usage.record(
+                provider=provider,
+                model=model,
+                key_masked=mask_key(key),
+                ok=ok,
+                throttled=throttled,
+                prompt_tokens=int(u.get("prompt_tokens") or 0),
+                completion_tokens=int(u.get("completion_tokens") or 0),
+            )
+        except Exception as exc:  # 台账失败绝不影响主流程
+            logger.warning("usage record failed: %s", exc)
 
     # ---- 公共接口 ----
     async def chat(self, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -141,6 +170,7 @@ class GatewayService:
                     tokens = int((usage or {}).get("total_tokens") or 0)
                     st.record_success(tokens)
                     self._record_model(model, True)
+                    self._book_usage(provider_cfg.name, model, key, ok=True, usage=usage)
 
                 def _on_stream_error(err: str):
                     # 上游中途断流：计入该 key 失败与该模型的失败统计
@@ -183,11 +213,18 @@ class GatewayService:
             if resp.status_code != 200:
                 await self._ensure_body(resp)
                 await self._passthrough(resp)
+                throttled = resp.status_code == 429 or _looks_throttled(resp)
+                self._record_model(model, False, throttled=throttled, error=_upstream_message(resp))
+                self._book_usage(provider_cfg.name, model, key, ok=False, throttled=throttled)
                 self._handle_error(key, st, resp, provider_cfg)
                 await resp.aclose()
                 raise upstream_failed("Upstream embeddings failed", f"status={resp.status_code}")
+            data = resp.json()
             st.record_success()
-            return resp.json()
+            self._record_model(model, True)
+            self._book_usage(provider_cfg.name, model, key, ok=True,
+                             usage=data.get("usage") or {})
+            return data
         finally:
             st.release()
 
@@ -206,11 +243,18 @@ class GatewayService:
             if resp.status_code != 200:
                 await self._ensure_body(resp)
                 await self._passthrough(resp)
+                throttled = resp.status_code == 429 or _looks_throttled(resp)
+                self._record_model(model, False, throttled=throttled, error=_upstream_message(resp))
+                self._book_usage(provider_cfg.name, model, key, ok=False, throttled=throttled)
                 self._handle_error(key, st, resp, provider_cfg)
                 await resp.aclose()
                 raise upstream_failed("Upstream images generation failed", f"status={resp.status_code}")
+            data = resp.json()
             st.record_success()
-            return resp.json()
+            self._record_model(model, True)
+            self._book_usage(provider_cfg.name, model, key, ok=True,
+                             usage=data.get("usage") or {})
+            return data
         finally:
             st.release()
 
@@ -281,9 +325,11 @@ class GatewayService:
 
             if resp.status_code == 200:
                 data = resp.json()
-                tokens = int((data.get("usage") or {}).get("total_tokens") or 0)
+                usage = data.get("usage") or {}
+                tokens = int(usage.get("total_tokens") or 0)
                 st.record_success(tokens)
                 self._record_model(model, True)
+                self._book_usage(provider_cfg.name, model, key, ok=True, usage=usage)
                 logger.info(
                     "chat key=%s model=%s attempt=%d status=200 elapsed=%.2fs tokens=%d",
                     mask_key(key), body.get("model"), attempt, time.monotonic() - started, tokens,

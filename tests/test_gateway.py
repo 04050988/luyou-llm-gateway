@@ -635,6 +635,51 @@ providers:
         self.assertIn("shared-model", stream.getvalue())
         tmp.cleanup()
 
+    # ---- 每日用量台账：成功/失败/限流/token 聚合 ----
+    def test_35_usage_ledger(self):
+        import asyncio as _asyncio
+        from gateway.usage import UsageLedger
+
+        async def run():
+            led = UsageLedger(self._tmp.name + "/usage_test.db")
+            led.record("p", "m1", "sk-x****1234", ok=True, prompt_tokens=10, completion_tokens=5)
+            led.record("p", "m1", "sk-x****1234", ok=True, prompt_tokens=20, completion_tokens=8)
+            led.record("p", "m1", "sk-y****5678", ok=False, throttled=True)
+            # 等待线程池写完
+            for t in list(led._pending):
+                await t
+            rows = led.query(days=7)
+            m1_x = [r for r in rows if r["model"] == "m1" and "x****" in r["key"]][0]
+            self.assertEqual(m1_x["requests"], 2)
+            self.assertEqual(m1_x["successes"], 2)
+            self.assertEqual(m1_x["total_tokens"], 43)  # (10+5)+(20+8)
+            m1_y = [r for r in rows if r["model"] == "m1" and "y****" in r["key"]][0]
+            self.assertEqual(m1_y["failures"], 1)
+            self.assertEqual(m1_y["throttled"], 1)
+            summary = led.summary(days=7)
+            self.assertEqual(summary["models"]["m1"]["requests"], 3)
+            self.assertEqual(summary["models"]["m1"]["total_tokens"], 43)
+        self.loop.run_until_complete(run())
+
+    # ---- /admin/usage 端点：鉴权 + 真实调用落账 ----
+    def test_36_admin_usage_endpoint(self):
+        async def run():
+            async with self._client() as c:
+                r0 = await c.get("/admin/usage")
+                self.assertEqual(r0.status_code, 401)
+                await c.post("/v1/chat/completions", json={"model": "mock-model", "messages": [{"role": "user", "content": "hi"}]}, headers=self._auth())
+                # 台账异步落盘，稍等
+                await asyncio.sleep(0.2)
+                r = await c.get("/admin/usage?days=7", headers=self._auth())
+                self.assertEqual(r.status_code, 200)
+                body = r.json()
+                self.assertIn("rows", body)
+                self.assertIn("summary", body)
+                mock_rows = [x for x in body["rows"] if x["provider"] == "mock"]
+                self.assertGreaterEqual(len(mock_rows), 1)
+                self.assertGreaterEqual(body["summary"]["models"]["mock-model"]["successes"], 1)
+        self.loop.run_until_complete(run())
+
     # ---- admin 端点需要鉴权 ----
     def test_15_admin_auth(self):
         async def run():

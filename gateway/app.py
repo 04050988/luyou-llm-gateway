@@ -200,4 +200,21 @@ def create_app(service: GatewayService) -> FastAPI:
         out["_models"] = service.stats.models_snapshot()
         return out
 
+    @app.get("/admin/usage")
+    async def admin_usage(
+        authorization: Optional[str] = Header(default=None),
+        days: int = 7,
+        provider: Optional[str] = None,
+    ):
+        """每日用量台账：?days=7&provider=sensenova。summary 为按模型聚合视图。"""
+        require_master(authorization)
+        days = max(1, min(days, 90))
+        rows = service.usage.query(days=days, provider=provider)
+        return {
+            "days": days,
+            "provider": provider,
+            "rows": rows,
+            "summary": service.usage.summary(days=days, provider=provider),
+        }
+
     return app
