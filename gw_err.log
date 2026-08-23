@@ -1,0 +1,67 @@
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "D:\xuex3\java_web\luyou\gateway\service.py", line 91, in chat_stream
+    raise no_available_key(provider_cfg.name, detail="stream retry")
+gateway.errors.GatewayError: All keys for provider 'sensenova' are exhausted or cooling down
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 422, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 63, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\fastapi\applications.py", line 1163, in __call__
+    await super().__call__(scope, receive, send)
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\starlette\applications.py", line 96, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\starlette\middleware\errors.py", line 186, in __call__
+    raise exc
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\starlette\middleware\errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\starlette\routing.py", line 670, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\fastapi\routing.py", line 2734, in app
+    await route.handle(scope, receive, send)
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\fastapi\routing.py", line 1281, in handle
+    await super().handle(scope, receive, send)
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\starlette\routing.py", line 280, in handle
+    await self.app(scope, receive, send)
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\fastapi\routing.py", line 158, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\fastapi\routing.py", line 145, in app
+    await response(scope, receive, send)
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\starlette\responses.py", line 273, in __call__
+    async with create_collapsing_task_group() as task_group:
+  File "C:\Users\cyxqw\AppData\Roaming\uv\python\cpython-3.11-windows-x86_64-none\Lib\contextlib.py", line 231, in __aexit__
+    await self.gen.athrow(typ, value, traceback)
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\starlette\_utils.py", line 93, in create_collapsing_task_group
+    raise exc from exc.__cause__ or context
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\anyio\_core\_tasks.py", line 275, in _run_coro
+    retval = await self._coro
+             ^^^^^^^^^^^^^^^^
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\starlette\responses.py", line 276, in wrap
+    await func()
+  File "D:\xuex3\java_web\luyou\.venv\Lib\site-packages\starlette\responses.py", line 250, in stream_response
+    async for chunk in self.body_iterator:
+  File "D:\xuex3\java_web\luyou\gateway\service.py", line 116, in chat_stream
+    mask_key(key), model, time.monotonic() - started,
+    ^^^^^^^^^^^^^
+  File "D:\xuex3\java_web\luyou\gateway\service.py", line 24, in mask_key
+    if len(key) <= 8:
+       ^^^^^^^^
+TypeError: object of type 'NoneType' has no len()

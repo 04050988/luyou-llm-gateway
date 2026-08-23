@@ -1,0 +1,29 @@
+# 统一 LLM API 网关配置
+# key 建议使用 ${ENV_VAR} 引用环境变量，避免明文落盘
+
+master_key: "123567"
+gateway:
+  host: "127.0.0.1"
+  port: 8000
+  connect_timeout: 10        # 建连超时（秒）
+  read_timeout: 60           # 收到首个响应字节超时（秒），流式请求自动禁用
+  request_timeout: 600       # 整个请求硬上限（秒）
+  max_retries: 2             # 单个请求全局最大重试次数
+  retry_backoff_base: 1.0    # 指数退避基数（秒），另加 ±20% 抖动
+  cooldown_seconds: 60       # 限流/失败后冷却时长（秒）
+  failure_threshold: 3       # 连续失败达该值进入冷却
+  reload_debounce: 500       # 配置文件热加载防抖（毫秒）
+
+providers:
+  sensenova:
+    type: sensenova
+    base_url: "https://token.sensenova.cn/v1"
+    keys:
+      - "sk-wspJaUo533WNyeVRKcYpIrCvnjmExfm4"
+      - "sk-dolBvobbhvoG6KoJ3Ccyr5HZvZlqPybW"
+    # sensenova-u1-fast 为图片生成模型，需通过 /v1/images/generations 调用
+    models: ["sensenova-6.7-flash-lite", "sensenova-u1-fast", "deepseek-v4-flash", "glm-5.2"]
+    strategy: quota
+    tpm_threshold: 60000      # 每 key 每分钟 token 上限，按你账号实际额度填写
+    rpm_threshold: 100        # 每 key 每分钟请求数上限
+    concurrency_limit: 8      # 每 key 最大并发
