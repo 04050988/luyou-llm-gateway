@@ -37,6 +37,7 @@ class GatewaySettings:
     cooldown_seconds: int = 60
     failure_threshold: int = 3
     reload_debounce: int = 500
+    probe_interval: int = 300  # 后台 key 探活周期（秒），0 关闭
 
 
 @dataclass

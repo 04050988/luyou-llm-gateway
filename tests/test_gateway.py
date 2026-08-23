@@ -680,6 +680,40 @@ providers:
                 self.assertGreaterEqual(body["summary"]["models"]["mock-model"]["successes"], 1)
         self.loop.run_until_complete(run())
 
+    # ---- 探活：手动触发 probe_all，mock 上游正常时应全部 ok ----
+    def test_37_probe_all(self):
+        async def run():
+            results = await self.service.probe_all()
+            self.assertGreaterEqual(len(results), 1)
+            for r in results:
+                if r["provider"] == "mock":
+                    self.assertEqual(r["status"], "ok")
+                    self.assertIn(r["state"], ("active", "cooldown", "probation"))
+        self.loop.run_until_complete(run())
+
+    # ---- /admin/probe 端点：需鉴权 ----
+    def test_38_admin_probe_auth(self):
+        async def run():
+            async with self._client() as c:
+                r = await c.post("/admin/probe")
+                self.assertEqual(r.status_code, 401)
+                r2 = await c.post("/admin/probe", headers=self._auth())
+                self.assertEqual(r2.status_code, 200)
+                body = r2.json()
+                self.assertIn("results", body)
+        self.loop.run_until_complete(run())
+
+    # ---- dashboard 静态页可访问（无需鉴权，数据接口才要 key）----
+    def test_39_dashboard_page(self):
+        async def run():
+            async with self._client() as c:
+                r = await c.get("/admin/dashboard")
+                self.assertEqual(r.status_code, 200)
+                text = r.text
+                self.assertIn("LLM 网关监控", text)
+                self.assertIn("/admin/stats", text)
+        self.loop.run_until_complete(run())
+
     # ---- admin 端点需要鉴权 ----
     def test_15_admin_auth(self):
         async def run():

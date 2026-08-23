@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import logging
+import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from . import __version__
 from .auth import verify_master_key
@@ -216,5 +218,17 @@ def create_app(service: GatewayService) -> FastAPI:
             "rows": rows,
             "summary": service.usage.summary(days=days, provider=provider),
         }
+
+    # ---- 探活 ----
+    @app.post("/admin/probe")
+    async def admin_probe(authorization: Optional[str] = Header(default=None)):
+        require_master(authorization)
+        results = await service.probe_all()
+        return {"probed_at": int(time.time()), "results": results}
+
+    @app.get("/admin/dashboard", include_in_schema=False)
+    async def admin_dashboard():
+        """监控面板（静态页，浏览器直接访问；数据接口需 master key）。"""
+        return FileResponse(Path(__file__).parent / "dashboard.html")
 
     return app

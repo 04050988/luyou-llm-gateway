@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>LLM 网关监控</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: #0d1117; color: #e6edf3; padding: 24px;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #8b949e; font-size: 13px; margin-bottom: 20px; }
+  .bar {
+    display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap;
+  }
+  input[type=password] {
+    background: #161b22; border: 1px solid #30363d; color: #e6edf3;
+    padding: 8px 10px; border-radius: 6px; width: 260px; font-size: 13px;
+  }
+  button {
+    background: #238636; border: none; color: #fff; padding: 8px 14px;
+    border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { background: #2ea043; }
+  button.sec { background: #21262d; border: 1px solid #30363d; }
+  button.sec:hover { background: #30363d; }
+  section { margin-bottom: 28px; }
+  h2 { font-size: 15px; color: #58a6ff; margin-bottom: 10px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #21262d; }
+  th { color: #8b949e; font-weight: 600; }
+  .pill {
+    display: inline-block; padding: 2px 9px; border-radius: 10px;
+    font-size: 12px;
+  }
+  .ok      { background: #12351f; color: #3fb950; }
+  .cooling { background: #3a1d10; color: #f0883e; }
+  .probation { background: #2d2a0f; color: #d29922; }
+  .unknown { background: #21262d; color: #8b949e; }
+  .err { color: #f85149; }
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; }
+  .card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 14px 18px; min-width: 170px;
+  }
+  .card .v { font-size: 22px; font-weight: 700; margin-top: 4px; }
+  .card .t { color: #8b949e; font-size: 12px; }
+  #msg { color: #f85149; font-size: 13px; min-height: 18px; margin-top: 8px; }
+  .muted { color: #8b949e; }
+</style>
+</head>
+<body>
+<h1>🛰️ LLM 网关监控</h1>
+<div class="sub">/admin/dashboard · 数据来自 /admin/stats · /admin/usage · /admin/probe</div>
+
+<div class="bar">
+  <input id="mk" type="password" placeholder="master key" onkeydown="if(event.key==='Enter')load()">
+  <button onclick="load()">刷新</button>
+  <button class="sec" onclick="probe()">探活全部 key</button>
+  <span id="updated" class="muted"></span>
+</div>
+<div id="msg"></div>
+
+<section>
+  <h2>平台与 Key 状态</h2>
+  <table id="keys"><thead><tr>
+    <th>平台</th><th>Key</th><th>状态</th><th>RPM窗口</th><th>TPM窗口</th>
+    <th>并发</th><th>限流连击</th><th>60s成功率</th>
+  </tr></thead><tbody></tbody></table>
+</section>
+
+<section>
+  <h2>模型健康（进程内）</h2>
+  <table id="models"><thead><tr>
+    <th>模型</th><th>调用</th><th>成功</th><th>失败</th><th>被限流</th><th>成功率</th><th>最近错误</th>
+  </tr></thead><tbody></tbody></table>
+</section>
+
+<section>
+  <h2>每日用量台账（近 7 天，按模型聚合）</h2>
+  <div class="cards" id="usageCards"></div>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function headers() { return { Authorization: 'Bearer ' + $('mk').value }; }
+
+function fail(msg) { $('msg').textContent = msg; }
+
+async function load() {
+  if (!$('mk').value) { fail('请输入 master key'); return; }
+  fail('');
+  try {
+    const [statsR, usageR] = await Promise.all([
+      fetch('/admin/stats', { headers: headers() }),
+      fetch('/admin/usage?days=7', { headers: headers() }),
+    ]);
+    if (statsR.status === 401 || usageR.status === 401) { fail('master key 错误'); return; }
+    const stats = await statsR.json();
+    const usage = await usageR.json();
+
+    // keys 表
+    const tb = $('keys').querySelector('tbody'); tb.innerHTML = '';
+    for (const [prov, keys] of Object.entries(stats)) {
+      if (prov.startsWith('_') || !Array.isArray(keys)) continue;
+      for (const k of keys) {
+        const rate = k.success_rate_60s == null ? '—' : Math.round(k.success_rate_60s * 100) + '%';
+        tb.insertAdjacentHTML('beforeend', `<tr>
+          <td>${esc(prov)}</td><td>${esc(k.key)}</td>
+          <td><span class="pill ${k.state}">${k.state}</span></td>
+          <td>${k.rpm_window}</td><td>${k.tpm_window}</td>
+          <td>${k.concurrency}</td>
+          <td>${k.throttle_streak > 0 ? '<span class=err>' + k.throttle_streak + '</span>' : '0'}</td>
+          <td>${rate}</td></tr>`);
+      }
+    }
+
+    // 模型健康
+    const mt = $('models').querySelector('tbody'); mt.innerHTML = '';
+    const models = stats._models || {};
+    for (const [name, m] of Object.entries(models).sort((a,b)=>b[1].total-a[1].total)) {
+      const rate = m.total ? Math.round(m.success / m.total * 100) + '%' : '—';
+      mt.insertAdjacentHTML('beforeend', `<tr>
+        <td>${esc(name)}</td><td>${m.total}</td><td>${m.success}</td>
+        <td class="${m.failures?'err':''}">${m.failures}</td>
+        <td class="${m.throttled?'err':''}">${m.throttled}</td><td>${rate}</td>
+        <td class="muted">${esc(m.last_error || '')}</td></tr>`);
+    }
+    if (!Object.keys(models).length)
+      mt.innerHTML = '<tr><td colspan=7 class=muted>暂无调用记录</td></tr>';
+
+    // 用量卡片
+    const uc = $('usageCards'); uc.innerHTML = '';
+    const um = usage.summary?.models || {};
+    for (const [name, u] of Object.entries(um)) {
+      uc.insertAdjacentHTML('beforeend', `<div class="card">
+        <div class="t">${esc(name)}</div><div class="v">${u.total_tokens}</div>
+        <div class="t">tokens · ${u.requests} 次 · 失败 ${u.failures} · 限流 ${u.throttled}</div>
+      </div>`);
+    }
+    if (!Object.keys(um).length) uc.innerHTML = '<span class=muted>近 7 天无用量</span>';
+
+    $('updated').textContent = '更新于 ' + new Date().toLocaleTimeString();
+  } catch (e) { fail('请求失败: ' + e.message); }
+}
+
+async function probe() {
+  if (!$('mk').value) { fail('请输入 master key'); return; }
+  fail('');
+  try {
+    const r = await fetch('/admin/probe', { method: 'POST', headers: headers() });
+    if (r.status === 401) { fail('master key 错误'); return; }
+    const d = await r.json();
+    load();
+  } catch (e) { fail('探活失败: ' + e.message); }
+}
+
+setInterval(() => { if ($('mk').value) load(); }, 15000);
+</script>
+</body>
+</html>

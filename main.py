@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import logging.handlers
 import sys
@@ -74,6 +75,17 @@ def main() -> None:
     settings = rm.current().config.gateway
     service = GatewayService(rm, settings)
     app = create_app(service)
+
+    # 后台 key 探活（probe_interval=0 可关闭）
+    service._loop_probe = asyncio.new_event_loop()
+    import threading
+
+    def _run_probe_loop():
+        asyncio.set_event_loop(service._loop_probe)
+        service._loop_probe.run_until_complete(service.start_probe_loop())
+
+    probe_thread = threading.Thread(target=_run_probe_loop, daemon=True, name="gateway-probe")
+    probe_thread.start()
 
     watcher = ConfigWatcher(rm, settings.reload_debounce)
     observer = Observer()

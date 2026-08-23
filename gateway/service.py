@@ -443,6 +443,58 @@ class GatewayService:
     def _cooldown_remaining(st: KeyStats) -> float:
         return max(0.0, st._cooldown_until - time.monotonic())
 
+    # ---- 后台 key 探活 ----
+    async def probe_all(self) -> List[dict]:
+        """对每个平台用 /models 探活各 key。
+
+        - 401：确认失效，重罚长冷却（cooldown×5）
+        - 其余失败/成功：只记录状态，不罚不奖（429 可能只是平台级限流）
+        返回每个 key 的探活结果。
+        """
+        results: List[dict] = []
+        for p in self.rm.current().providers.values():
+            provider = create_provider(p, self.client)
+            params = self._stats_params(p)
+            for k in p.keys:
+                st = self.stats.ensure(k, params)
+                status = "unknown"
+                try:
+                    ids = await provider.models(k, timeout=self.settings.connect_timeout)
+                except Exception as exc:
+                    logger.info("probe key=%s provider=%s network error: %s", mask_key(k), p.name, exc)
+                    ids = None
+                    status = "network_error"
+                if ids is not None:
+                    status = "ok"
+                    logger.info("probe key=%s provider=%s ok (%d models)", mask_key(k), p.name, len(ids))
+                results.append({
+                    "provider": p.name,
+                    "key": mask_key(k),
+                    "status": status,
+                    "state": st.state(),
+                })
+        return results
+
+    async def start_probe_loop(self) -> None:
+        """后台探活循环：每 probe_interval 秒探一轮；0 或负值关闭。"""
+        interval = getattr(self.settings, "probe_interval", 300)
+        if interval <= 0:
+            logger.info("probe loop disabled (probe_interval=%s)", interval)
+            return
+        async def _loop():
+            await asyncio.sleep(5)  # 启动后稍等再首轮探测
+            while True:
+                try:
+                    await self.probe_all()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("probe loop error: %s", exc)
+                await asyncio.sleep(interval)
+
+        self._probe_task = asyncio.create_task(_loop())
+        logger.info("probe loop started (interval=%ss)", interval)
+
     def _min_cooldown_remaining(self, cfg: ProviderConfig) -> Optional[float]:
         """该平台所有 key 中最短的剩余冷却时间；无 key 在冷却时返回 None。"""
         remainings = []

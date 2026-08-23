@@ -69,7 +69,7 @@ def _build_settings(raw_gateway: Optional[dict]) -> GatewaySettings:
         return s
     known = ("host", "port", "connect_timeout", "read_timeout", "request_timeout",
              "max_retries", "retry_backoff_base", "cooldown_seconds", "failure_threshold",
-             "reload_debounce")
+             "reload_debounce", "probe_interval")
     unknown = set(raw_gateway) - set(known)
     if unknown:
         raise invalid_request(
