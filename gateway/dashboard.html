@@ -110,11 +110,12 @@ async function load() {
       if (prov.startsWith('_') || !Array.isArray(keys)) continue;
       for (const k of keys) {
         const rate = k.success_rate_60s == null ? '—' : Math.round(k.success_rate_60s * 100) + '%';
+        const num = (v) => (typeof v === 'number' ? v : '—');
         tb.insertAdjacentHTML('beforeend', `<tr>
           <td>${esc(prov)}</td><td>${esc(k.key)}</td>
-          <td><span class="pill ${k.state}">${k.state}</span></td>
-          <td>${k.rpm_window}</td><td>${k.tpm_window}</td>
-          <td>${k.concurrency}</td>
+          <td><span class="pill ${k.state}">${esc(k.state)}</span></td>
+          <td>${num(k.rpm_window)}</td><td>${num(k.tpm_window)}</td>
+          <td>${num(k.concurrency)}</td>
           <td>${k.throttle_streak > 0 ? '<span class=err>' + k.throttle_streak + '</span>' : '0'}</td>
           <td>${rate}</td></tr>`);
       }

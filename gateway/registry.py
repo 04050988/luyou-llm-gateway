@@ -69,7 +69,7 @@ def _build_settings(raw_gateway: Optional[dict]) -> GatewaySettings:
         return s
     known = ("host", "port", "connect_timeout", "read_timeout", "request_timeout",
              "max_retries", "retry_backoff_base", "cooldown_seconds", "failure_threshold",
-             "reload_debounce", "probe_interval")
+             "reload_debounce", "probe_interval", "fallback_chain")
     unknown = set(raw_gateway) - set(known)
     if unknown:
         raise invalid_request(
@@ -127,6 +127,22 @@ def validate(config: GatewayConfig) -> List[str]:
         for model, target in p.route_to.items():
             if target not in config.providers:
                 errors.append(f"provider '{name}': route_to['{model}'] 指向不存在的平台 '{target}'")
+    # fallback_chain 中的平台必须存在且不重复
+    if getattr(config.gateway, "fallback_chain", None):
+        seen = set()
+        for target in config.gateway.fallback_chain:
+            if target not in config.providers:
+                errors.append(f"gateway: fallback_chain 指向不存在的平台 '{target}'")
+            if target in seen:
+                errors.append(f"gateway: fallback_chain 中平台 '{target}' 重复")
+            seen.add(target)
+    # 别名指向的模型必须真实存在（静态或别名自身不做递归解析）
+    known_models = {m for p in config.providers.values() for m in p.models}
+    for alias, real in (config.aliases or {}).items():
+        if alias == real:
+            errors.append(f"aliases: '{alias}' 不能指向自己")
+        elif real not in known_models and real not in config.aliases:
+            warnings.append(f"aliases: '{alias}' -> '{real}'，但 '{real}' 不在任何平台的静态 models 里（动态目录模型可用，静态拼写错误会静默失效）")
     # 同名模型出现在多个平台：路由按声明顺序取第一个，提醒用户避免歧义
     owner: dict[str, str] = {}
     for name, p in config.providers.items():
@@ -160,6 +176,7 @@ def load_config(path: str) -> GatewayConfig:
         master_key=raw_master,
         gateway=_build_settings(raw.get("gateway")),
         providers={name: _build_provider(name, p) for name, p in (raw.get("providers") or {}).items()},
+        aliases={str(k): str(v) for k, v in (raw.get("aliases") or {}).items()},
     )
     errs = validate(cfg)
     if errs:

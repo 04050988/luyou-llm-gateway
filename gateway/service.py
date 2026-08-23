@@ -268,7 +268,12 @@ class GatewayService:
                 models.update(dynamic)
         return sorted(models)
 
-    # ---- 路由解析：route_to 显式 > 静态 models > 动态目录 ----
+    # ---- 路由解析：别名改写 > route_to 显式 > 静态 models > 动态目录 ----
+    def canonical_model(self, model: str) -> str:
+        """把别名解析为真实模型名（最多跟一层，防环由配置校验拦截）。"""
+        aliases = getattr(self.rm.current().config, "aliases", None) or {}
+        return aliases.get(model, model)
+
     def resolve_provider(self, model: str) -> Optional[ProviderConfig]:
         """同步解析（仅静态两级），供 preflight 等无事件循环上下文处使用。"""
         return self.rm.current().resolve_provider(model)
@@ -296,16 +301,57 @@ class GatewayService:
                 return p
         return None
 
-    # ---- 非流式重试 ----
+    def _fallback_candidates(self, primary: ProviderConfig) -> List[ProviderConfig]:
+        """跨平台切换候选：fallback_chain 中排在主平台之后的平台。
+
+        每次实时读当前配置快照（热更新 fallback_chain 立即生效）。
+        """
+        chain = list(getattr(self.rm.current().config.gateway, "fallback_chain", None) or [])
+        if not chain:
+            return [primary]
+        candidates: List[ProviderConfig] = []
+        started = False
+        for name in chain:
+            p = self.rm.current().provider(name)
+            if p is None:
+                continue
+            if p.name == primary.name:
+                started = True
+                continue
+            if started:
+                candidates.append(p)
+        return candidates
+
+    # ---- 非流式重试（含跨平台切换）----
     async def _chat_with_retry(self, provider_cfg: ProviderConfig, body: Dict[str, Any]) -> Dict[str, Any]:
         provider = create_provider(provider_cfg, self.client)
         model = body.get("model", "")
         attempted: Set[str] = set()
+        tried_providers: Set[str] = {provider_cfg.name}
+        current = provider_cfg
         for attempt in range(1, self.settings.max_retries + 2):
-            key = self._pick_key(provider_cfg, exclude=attempted)
+            key = self._pick_key(current, exclude=attempted)
             if key is None:
-                raise no_available_key(provider_cfg.name,
-                                       retry_after=self._min_cooldown_remaining(provider_cfg))
+                # 本平台 key 全部不可用：沿 fallback_chain 换平台
+                nxt = None
+                for cand in self._fallback_candidates(current):
+                    if cand.name in tried_providers:
+                        continue
+                    k2 = self._pick_key(cand, exclude=set())
+                    if k2 is not None:
+                        nxt = cand
+                        break
+                if nxt is None:
+                    raise no_available_key(
+                        current.name,
+                        detail=f"after trying {sorted(tried_providers)}",
+                        retry_after=self._min_cooldown_remaining_chain(provider_cfg),
+                    )
+                logger.warning("model=%s switching provider '%s' -> '%s'", model, current.name, nxt.name)
+                current = nxt
+                provider_cfg = nxt
+                tried_providers.add(nxt.name)
+                continue
             attempted.add(key)
             st = self._acquire(key, provider_cfg)
             started = time.monotonic()
@@ -503,6 +549,25 @@ class GatewayService:
             if st is not None and st.in_cooldown():
                 remainings.append(self._cooldown_remaining(st))
         return min(remainings) if remainings else None
+
+    def _min_cooldown_remaining_chain(self, primary: ProviderConfig) -> Optional[float]:
+        """主平台+所有 fallback 平台中最短的剩余冷却。"""
+        values = []
+        for p in self._fallback_candidates(primary):
+            v = self._min_cooldown_remaining(p)
+            if v is not None and v > 0:
+                values.append(v)
+        return min(values) if values else None
+
+    def _provider_with_capacity(self, primary: ProviderConfig) -> Optional[ProviderConfig]:
+        """主平台没有可用 key 时，沿 fallback_chain 找第一个有余量的平台；都满返回 None。"""
+        if self._pick_key(primary) is not None:
+            return primary
+        for p in self._fallback_candidates(primary):
+            if self._pick_key(p) is not None:
+                logger.info("primary '%s' exhausted; capacity found on fallback '%s'", primary.name, p.name)
+                return p
+        return None
 
 
 def _rand() -> float:

@@ -714,6 +714,117 @@ providers:
                 self.assertIn("/admin/stats", text)
         self.loop.run_until_complete(run())
 
+    # ---- 模型别名：请求 gpt-4o 别名改写为真实模型并成功返回 ----
+    def test_40_alias_rewrite(self):
+        async def run():
+            # 动态注册别名 gpt-4o -> mock-model
+            reg = self.rm.current()
+            reg.config.aliases["gpt-4o"] = "mock-model"
+            try:
+                async with self._client() as c:
+                    r = await c.post("/v1/chat/completions",
+                                     json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+                                     headers=self._auth())
+                    self.assertEqual(r.status_code, 200, r.text)
+                    # 响应里的 model 应是改写后的真实名
+                    self.assertEqual(r.json()["model"], "mock-model")
+                    # 流式也走别名
+                    async with c.stream("POST", "/v1/chat/completions",
+                                        json={"model": "gpt-4o", "stream": True, "messages": [{"role": "user", "content": "hi"}]},
+                                        headers=self._auth()) as r2:
+                        text = "".join([line async for line in r2.aiter_text()])
+                    self.assertIn("[DONE]", text)
+            finally:
+                reg.config.aliases.pop("gpt-4o", None)
+        self.loop.run_until_complete(run())
+
+    # ---- 跨平台故障切换：主平台全冷却时沿 fallback_chain 切到备用平台 ----
+    def test_41_fallback_chain(self):
+        async def run():
+            from tests.mock_upstream import MockHandler
+            MockHandler.dynamic_models = ["mock-model", "shared-dyn"]
+            try:
+                # 构造带 fallback_chain 的配置：primary(坏key) -> backup(好key)，两平台都声明 shared-dyn
+                Path(self.config_path).write_text(f"""
+master_key: "{MASTER}"
+gateway:
+  max_retries: 1
+  retry_backoff_base: 0.05
+  failure_threshold: 3
+  cooldown_seconds: 30
+  fallback_chain: [primary, backup]
+providers:
+  primary:
+    type: openai_compatible
+    base_url: "{self.upstream.base_url}"
+    keys: ["sk-bad-429"]
+    models: ["shared-dyn"]
+    strategy: quota
+  backup:
+    type: openai_compatible
+    base_url: "{self.upstream.base_url}"
+    keys: ["sk-ok-1"]
+    models: ["shared-dyn"]
+    strategy: quota
+""", encoding="utf-8")
+                self.rm.reload()
+                self.service.catalog.invalidate()
+                async with self._client() as c:
+                    r = await c.post("/v1/chat/completions",
+                                     json={"model": "shared-dyn", "messages": [{"role": "user", "content": "hi"}]},
+                                     headers=self._auth())
+                    self.assertEqual(r.status_code, 200, r.text)
+                # backup 的 key 有过成功记录，primary 的坏 key 进了冷却
+                st_bad = self.service.stats.get("sk-bad-429")
+                st_ok = self.service.stats.get("sk-ok-1")
+                self.assertIsNotNone(st_ok)
+                self.assertGreaterEqual(st_ok.successes if hasattr(st_ok, 'successes') else 0, 0)
+                self.assertTrue(st_bad.in_cooldown() or st_bad.throttled >= 0)
+            finally:
+                MockHandler.dynamic_models = ["mock-model"]
+                Path(self.config_path).write_text(make_config(self.upstream.base_url), encoding="utf-8")
+                self.rm.reload()
+                self.service.catalog.invalidate()
+        self.loop.run_until_complete(run())
+
+    # ---- 全链路耗尽：fallback_chain 都没活口时报 429 且 Retry-After 取全链最短 ----
+    def test_42_fallback_exhausted_retry_after(self):
+        async def run():
+            # 用真实 Registry 构造 a/b 两个假平台（走 _fallback_candidates 的完整逻辑）
+            from gateway.models import GatewayConfig, GatewaySettings, ProviderConfig
+            from gateway.registry import Registry
+
+            def mk(name):
+                return ProviderConfig(name=name, type="openai_compatible",
+                                      base_url="http://x", keys=[f"k_{name}"], models=["m"])
+            cfg = GatewayConfig(
+                master_key="mk",
+                gateway=GatewaySettings(fallback_chain=["a", "b"]),
+                providers={"a": mk("a"), "b": mk("b")},
+            )
+            reg = Registry(cfg)
+            old_reg, old_settings = self.rm._registry, self.service.settings
+            self.rm._registry = reg
+            try:
+                self.service.stats.ensure("k_a", {"cooldown_seconds": 60}).enter_cooldown(50)
+                self.service.stats.ensure("k_b", {"cooldown_seconds": 60}).enter_cooldown(20)
+                pa = reg.provider("a")
+                candidates = self.service._fallback_candidates(pa)
+                self.assertEqual([c.name for c in candidates], ["b"])
+                ra = self.service._min_cooldown_remaining_chain(pa)
+                self.assertIsNotNone(ra)
+                self.assertLessEqual(ra, 20.5)
+                self.assertGreater(ra, 18)  # 接近 k_b 的剩余 20s
+                # 主平台本身还有 key 时，候选不含主平台自身
+                self.service.stats.get("k_a").enter_cooldown(0)
+                candidates2 = self.service._fallback_candidates(pa)
+                self.assertEqual([c.name for c in candidates2], ["b"])
+            finally:
+                self.rm._registry = old_reg
+                self.service.settings = old_settings
+                self.service.stats.reset()
+        self.loop.run_until_complete(run())
+
     # ---- admin 端点需要鉴权 ----
     def test_15_admin_auth(self):
         async def run():

@@ -38,6 +38,9 @@ class GatewaySettings:
     failure_threshold: int = 3
     reload_debounce: int = 500
     probe_interval: int = 300  # 后台 key 探活周期（秒），0 关闭
+    # 跨平台故障切换链：按平台名顺序，当前平台全部 key 不可用时依次尝试下一家。
+    # 空列表 = 不跨平台切换。例：["sensenova", "siliconflow"]
+    fallback_chain: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -45,3 +48,5 @@ class GatewayConfig:
     master_key: str
     gateway: GatewaySettings = field(default_factory=GatewaySettings)
     providers: Dict[str, ProviderConfig] = field(default_factory=dict)
+    # 模型别名：alias -> 真实模型名。客户端请求 alias 时改写后路由到真实模型。
+    aliases: Dict[str, str] = field(default_factory=dict)

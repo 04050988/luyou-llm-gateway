@@ -74,18 +74,24 @@ def create_app(service: GatewayService) -> FastAPI:
 
     # ---- 预检：把路由/无可用 key 等错误在流开始前转成 JSON ----
     async def _preflight(body: Dict[str, Any], stream: bool) -> None:
-        model = body.get("model", "")
+        # 别名改写：客户端请求 gpt-4o 这类别名时改写成真实模型名
+        model = service.canonical_model(body.get("model", ""))
+        body["model"] = model
         if not model:
             raise invalid_request("model is required")
         cfg = await service.resolve_provider_async(model)
         if cfg is None:
             raise GatewayError(404, f"Model '{model}' not found", "model_not_found")
         if service._pick_key(cfg) is None:
-            raise GatewayError(
-                429,
-                f"All keys for provider '{cfg.name}' are exhausted or cooling down",
-                "provider_overloaded",
-            )
+            # 主平台不可用时看看链上还有没有活口，有就放行（service 层会自行切换）
+            alive = service._provider_with_capacity(cfg)
+            if alive is None:
+                raise GatewayError(
+                    429,
+                    f"All providers for '{model}' are exhausted or cooling down",
+                    "provider_overloaded",
+                    retry_after=service._min_cooldown_remaining_chain(cfg),
+                )
         if stream:
             body["stream"] = True
 
