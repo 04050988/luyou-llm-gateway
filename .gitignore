@@ -7,3 +7,4 @@ gw_*.log
 *.db
 usage.db
 .env
+config.yaml

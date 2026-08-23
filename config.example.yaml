@@ -1,0 +1,53 @@
+# 统一 LLM API 网关配置模板 —— 复制为 config.yaml 后填入真实值
+# 敏感 key 建议用 ${ENV_VAR} 引用环境变量，避免明文落盘
+
+master_key: "${GATEWAY_MASTER_KEY}"        # 客户端调用本网关用的主 key（建议 32 位随机串）
+
+gateway:
+  host: "127.0.0.1"
+  port: 8000
+  connect_timeout: 10       # 建连超时（秒）
+  read_timeout: 60          # 首字节超时（秒）
+  request_timeout: 600      # 单请求硬上限（秒）
+  max_retries: 2            # 全局最大重试次数
+  retry_backoff_base: 1.0   # 指数退避基数（秒），±20% 抖动
+  cooldown_seconds: 60      # 冷却封顶时长（秒）
+  failure_threshold: 3      # 连续失败进入冷却的阈值
+  reload_debounce: 500      # 配置热加载防抖（毫秒）
+  probe_interval: 300       # 后台 key 探活周期（秒），0 关闭
+  # 跨平台故障切换链：主平台全冷却时按顺序切换。留空 = 不跨平台
+  # fallback_chain: ["sensenova", "siliconflow"]
+
+providers:
+  sensenova:                          # 商汤日日新（内置适配器：字段剥离等兼容处理）
+    type: sensenova
+    base_url: "https://token.sensenova.cn/v1"
+    keys:
+      - "${SENSENOVA_KEY_1}"
+      - "${SENSENOVA_KEY_2}"
+    models:                           # 静态声明（动态目录会自动补充平台上新模型）
+      - "sensenova-6.7-flash-lite"
+      - "deepseek-v4-flash"
+    strategy: quota                   # quota=余量感知 / round_robin=轮询
+    tpm_threshold: 60000              # 每 key TPM 上限（按账号实际额度填）
+    rpm_threshold: 100                # 每 key RPM 上限
+    concurrency_limit: 8              # 每 key 最大并发
+    cooldown_seconds: 60              # 该平台冷却封顶（秒）
+
+  # 任意 OpenAI 兼容平台零代码接入示例：
+  # siliconflow:
+  #   type: openai_compatible
+  #   base_url: "https://api.siliconflow.cn/v1"
+  #   keys: ["${SILICONFLOW_KEY}"]
+  #   models: ["deepseek-ai/DeepSeek-V3"]
+  #   strategy: quota
+
+# 模型别名：客户端请求别名时自动改写为真实模型名
+# aliases:
+#   gpt-4o: "deepseek-v4-flash"
+#   my-model: "sensenova-6.7-flash-lite"
+
+# 显式路由（可选）：把某模型固定到某平台
+# route_to 写在对应 provider 下：
+#   route_to:
+#     "deepseek-v4-flash": sensenova
