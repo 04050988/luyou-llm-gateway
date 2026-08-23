@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+gw.log
+gw.log.*
+gw_*.log
+*.db
+usage.db
+.env
