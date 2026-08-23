@@ -122,12 +122,15 @@ class KeyStats:
         self._probation_token = None
 
     def in_cooldown(self) -> bool:
-        if time.monotonic() < self._cooldown_until:
-            return True
+        """纯谓词：冷却是否未过。不改变任何状态（副作用见 maybe_promote）。"""
+        return time.monotonic() < self._cooldown_until
+
+    def maybe_promote(self) -> None:
+        """调度路径专用：冷却刚到期时转入半开，放行探测请求。"""
+        if self.in_cooldown():
+            return
         if self._cooldown_until > 0 and not self.probation and self._probation_token is None:
-            # 冷却刚到期：转入半开，放行下一个请求做探测
             self.probation = True
-        return False
 
     def begin_probe(self) -> object:
         """半开状态下领取探测令牌；同一时刻只允许一个探测请求。"""
@@ -181,6 +184,8 @@ class KeyStats:
         return max(0.0, 1.0 - self.concurrency / self.concurrency_limit)
 
     def available(self) -> bool:
+        """调度路径调用：先推进冷却→半开的显式迁移，再判定可用性。"""
+        self.maybe_promote()
         if self.in_cooldown():
             return False
         # 半开且已有探测在途：不再接新流量

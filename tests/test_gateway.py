@@ -415,10 +415,11 @@ class TestGateway(unittest.TestCase):
         self.assertFalse(st.available())
         # 冷却未到期：in_cooldown 不会转半开
         self.assertEqual(st.state(), "cooldown")
-        # 模拟冷却到期
+        # 模拟冷却到期：只读调用（state()）不再触发迁移，须由调度路径显式推进
         st._cooldown_until = time.monotonic() - 0.01
-        self.assertEqual(st.state(), "probation")   # 到期即转半开
-        self.assertTrue(st.available())             # 半开放行探测请求
+        self.assertEqual(st.state(), "active")      # 纯谓词不改变状态
+        self.assertTrue(st.available())             # 调度路径触发 cooldown→probation 迁移
+        self.assertEqual(st.state(), "probation")   # 半开放行探测请求
         token = st.begin_probe()
         self.assertTrue(st.probe_in_flight())
         self.assertFalse(st.available())            # 探测在途不再接新流量
@@ -433,7 +434,8 @@ class TestGateway(unittest.TestCase):
         st = KeyStats(tpm_threshold=60000, rpm_threshold=100, concurrency_limit=8,
                       cooldown_seconds=30, failure_threshold=1)
         st.enter_cooldown(30)
-        st._cooldown_until = time.monotonic() - 0.01   # 到期转半开
+        st._cooldown_until = time.monotonic() - 0.01   # 到期；调度路径才转半开
+        self.assertTrue(st.available())                # 调度路径触发迁移
         self.assertEqual(st.state(), "probation")
         token = st.begin_probe()
         st.settle_probe_failure(token)
@@ -823,6 +825,97 @@ providers:
                 self.rm._registry = old_reg
                 self.service.settings = old_settings
                 self.service.stats.reset()
+        self.loop.run_until_complete(run())
+
+    # ---- 爆破限速：连续失败触发锁定，正确 key 也被拒；成功清零 ----
+    def test_43_auth_rate_limit(self):
+        from gateway.auth import AuthRateLimiter, verify_master_key
+
+        lim = AuthRateLimiter(max_failures=3, window=300, lockout=60)
+        # 3 次错误 → 锁定
+        for _ in range(3):
+            self.assertFalse(verify_master_key("Bearer wrong", "right-key"))
+        # 用独立 limiter 验证锁定行为（全局单例已被上面的失败污染）
+        lim2 = AuthRateLimiter(max_failures=3, window=300, lockout=60)
+        lim2.record_failure(); lim2.record_failure(); lim2.record_failure()
+        self.assertTrue(lim2.locked())
+        lim2.record_success()
+        self.assertFalse(lim2.locked())
+        # 全局 verify：正确 key 仍可通过（record_success 清零）
+        self.assertTrue(verify_master_key(f"Bearer {MASTER}", MASTER))
+
+    # ---- mask_key 只显示末4位 ----
+    def test_44_mask_key_suffix_only(self):
+        from gateway.service import mask_key
+        self.assertEqual(mask_key("sk-abcdefgh12345678"), "****5678")
+        self.assertEqual(mask_key("abc"), "****")
+        self.assertNotIn("sk-a", mask_key("sk-abcdefgh12345678"))
+
+    # ---- 流式 usage 后断流不双重计数 ----
+    def test_45_no_double_count_after_usage(self):
+        async def run():
+            st = self.service.stats.ensure("sk-dc-test", {"cooldown_seconds": 5})
+            settled = {"ok": False}
+            model = "mock-model"
+            def _on_usage(usage):
+                st.record_success(int((usage or {}).get("total_tokens") or 0))
+                self.service._record_model(model, True)
+                settled["ok"] = True
+            def _on_stream_error(err):
+                if settled["ok"]:
+                    return
+                st.record_failure()
+                self.service._record_model(model, False, error=err)
+            _on_usage({"total_tokens": 10})
+            fails_before = st.failures
+            mh_before = self.service.stats.models_snapshot()[model]["failures"]
+            _on_stream_error("late break")
+            self.assertEqual(st.failures, fails_before)      # 未新增失败
+            self.assertEqual(self.service.stats.models_snapshot()[model]["failures"], mh_before)
+        self.loop.run_until_complete(run())
+
+    # ---- fallback 切换后 provider 必须用新平台 cfg 重建（回归 HIGH bug）----
+    def test_46_fallback_rebuilds_provider(self):
+        from gateway.models import ProviderConfig
+        from gateway.provider import OpenAICompatibleProvider, SenseNovaProvider, create_provider
+
+        async def run():
+            Path(self.config_path).write_text(f"""
+master_key: "{MASTER}"
+gateway:
+  max_retries: 1
+  retry_backoff_base: 0.05
+  failure_threshold: 3
+  cooldown_seconds: 30
+  fallback_chain: [sn, oc]
+providers:
+  sn:
+    type: sensenova
+    base_url: "https://api.sensenova.example/v1"
+    keys: ["sk-bad-429"]
+    models: ["shared-dyn"]
+    strategy: quota
+  oc:
+    type: openai_compatible
+    base_url: "{self.upstream.base_url}"
+    keys: ["sk-ok-1"]
+    models: ["shared-dyn"]
+    strategy: quota
+""", encoding="utf-8")
+            self.rm.reload()
+            self.service.catalog.invalidate()
+            try:
+                async with self._client() as c:
+                    # 主平台 sensenova 全冷却 → 切到 oc 平台；若 provider 未重建会打到 sensenova URL 而失败
+                    r = await c.post("/v1/chat/completions",
+                                     json={"model": "shared-dyn", "messages": [{"role": "user", "content": "hi"}]},
+                                     headers=self._auth())
+                    self.assertEqual(r.status_code, 200, r.text)
+                    self.assertEqual(r.json()["model"], "shared-dyn")
+            finally:
+                Path(self.config_path).write_text(make_config(self.upstream.base_url), encoding="utf-8")
+                self.rm.reload()
+                self.service.catalog.invalidate()
         self.loop.run_until_complete(run())
 
     # ---- admin 端点需要鉴权 ----

@@ -47,7 +47,9 @@ def _message_summary(messages) -> str:
 
 
 def create_app(service: GatewayService) -> FastAPI:
-    app = FastAPI(title="Unified LLM API Gateway", version=__version__)
+    # 生产收敛：关闭交互式文档与 OpenAPI schema（不向外暴露路由结构）
+    app = FastAPI(title="Unified LLM API Gateway", version=__version__,
+                  docs_url=None, redoc_url=None, openapi_url=None)
 
     # ---- 异常处理：错误体与日志详情隔离 ----
     @app.exception_handler(GatewayError)
@@ -97,6 +99,13 @@ def create_app(service: GatewayService) -> FastAPI:
 
     @app.get("/v1/health")
     async def health():
+        """免鉴权存活探针：只暴露最小信息（版本），不泄露平台/模型/冷却状态。"""
+        return {"status": "ok", "version": __version__}
+
+    @app.get("/admin/health")
+    async def admin_health(authorization: Optional[str] = Header(default=None)):
+        """详细健康状态（需 master key）：各平台 key 冷却概况与模型清单。"""
+        require_master(authorization)
         reg = service.rm.current()
         providers = {}
         for name, p in reg.providers.items():

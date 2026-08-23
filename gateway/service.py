@@ -27,9 +27,10 @@ THROTTLE_BASE_COOLDOWN = 15.0
 
 
 def mask_key(key: str) -> str:
-    if len(key) <= 8:
+    """脱敏：只显示末 4 位（前缀不展示，缩小肩窥/截图泄漏面）。"""
+    if len(key) <= 4:
         return "****"
-    return f"{key[:4]}****{key[-4:]}"
+    return f"****{key[-4:]}"
 
 
 class GatewayService:
@@ -110,7 +111,7 @@ class GatewayService:
             if key is None:
                 raise no_available_key(provider_cfg.name, detail="stream",
                                        retry_after=self._min_cooldown_remaining(provider_cfg))
-            self._record_model(model, None)  # 占位计数：成功/失败在下方回调中补记
+            # 成功/失败由 _on_usage/_on_stream_error 回调补记，此处不占位计数
 
             st = self._acquire(key, provider_cfg)
             started = time.monotonic()
@@ -147,6 +148,8 @@ class GatewayService:
                         if key is None:
                             raise no_available_key(provider_cfg.name, detail="stream retry",
                                                    retry_after=self._min_cooldown_remaining(provider_cfg))
+                        # 换 key 前先释放上一个 key 的并发额度，避免泄漏
+                        st.release()
                         st = self._acquire(key, provider_cfg)
                         resp = await provider.chat(upstream_body, key, self.settings.request_timeout)
                         if resp.status_code == 200:
@@ -166,14 +169,21 @@ class GatewayService:
                     else:
                         raise last_error or no_available_key(provider_cfg.name, detail="stream all retries failed")
 
+                settled = {"ok": False}  # 防止 on_usage 与 on_stream_error 双重计数
+
                 def _on_usage(usage: dict):
                     tokens = int((usage or {}).get("total_tokens") or 0)
                     st.record_success(tokens)
                     self._record_model(model, True)
                     self._book_usage(provider_cfg.name, model, key, ok=True, usage=usage)
+                    settled["ok"] = True
 
                 def _on_stream_error(err: str):
-                    # 上游中途断流：计入该 key 失败与该模型的失败统计
+                    # 上游中途断流：计入该 key 失败与该模型的失败统计；
+                    # 若 usage 已到（请求实质成功）则不再补记失败
+                    if settled["ok"]:
+                        logger.info("stream interrupted after usage; not double-counting failure")
+                        return
                     st.record_failure()
                     self._record_model(model, False, error=f"stream interrupted: {err}")
 
@@ -350,6 +360,8 @@ class GatewayService:
                 logger.warning("model=%s switching provider '%s' -> '%s'", model, current.name, nxt.name)
                 current = nxt
                 provider_cfg = nxt
+                # 关键：用新平台配置重建 provider（URL/适配器都随平台变）
+                provider = create_provider(current, self.client)
                 tried_providers.add(nxt.name)
                 continue
             attempted.add(key)
